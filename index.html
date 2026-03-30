@@ -135,6 +135,10 @@ input[type=file]{display:none}
 .fi2:nth-child(1){animation-delay:.04s}.fi2:nth-child(2){animation-delay:.08s}
 .fi2:nth-child(3){animation-delay:.12s}.fi2:nth-child(4){animation-delay:.16s}
 .fi2:nth-child(5){animation-delay:.20s}
+.dir-btn{background:var(--w);border:none;color:var(--mu);font-family:'Source Sans 3',sans-serif;font-size:12px;font-weight:600;padding:7px 18px;cursor:pointer;transition:all .15s;border-right:1px solid var(--bd)}
+.dir-btn:last-child{border-right:none}
+.dir-btn.active{background:var(--g);color:#fff}
+.dir-btn:hover:not(.active){background:var(--gl);color:var(--g2)}
 @media(max-width:1000px){.kr{grid-template-columns:repeat(3,1fr)}.g2,.g3,.g2e{grid-template-columns:1fr}.db{padding:16px}.fb{padding:10px 16px}.smb{padding:8px 16px}}
 </style>
 </head>
@@ -197,6 +201,8 @@ input[type=file]{display:none}
     <div class="si"><span class="sdo"></span><span>Weergegeven:</span><strong id="sbsh">&#8212;</strong></div>
     <div class="si"><span class="sdo"></span><span>Bezorgd:</span><strong id="sbdl">&#8212;</strong></div>
     <div class="si"><span class="sdo"></span><span>Mislukt:</span><strong id="sbfl">&#8212;</strong></div>
+    <div class="si"><span class="sdo"></span><span>&#8595; Inkomend:</span><strong id="sb-in">&#8212;</strong></div>
+    <div class="si"><span class="sdo"></span><span>&#8593; Uitgaand:</span><strong id="sb-out">&#8212;</strong></div>
   </div>
   <div class="db">
     <div class="kr">
@@ -244,6 +250,25 @@ input[type=file]{display:none}
       <div class="st">Verkeersheatmap &mdash; Uur &times; Dag <span style="font-size:10px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--mu)">(klik op een cel voor details)</span></div>
       <div id="hmw"></div>
     </div>
+    <!-- INBOUND/OUTBOUND TOGGLE -->
+    <div style="display:flex;align-items:center;gap:0;margin-bottom:16px;border:1px solid var(--bd);border-radius:4px;overflow:hidden;width:fit-content">
+      <button class="dir-btn active" id="btn-in" onclick="setDir('Inbound')">&#8595; Inkomend</button>
+      <button class="dir-btn" id="btn-out" onclick="setDir('Outbound')">&#8593; Uitgaand</button>
+      <button class="dir-btn" id="btn-all" onclick="setDir('all')">Alles</button>
+    </div>
+
+    <!-- CVB MAILBOXES -->
+    <div class="g2e" style="margin-bottom:16px">
+      <div class="card fi2">
+        <div class="st" id="mbox-title">Inkomend per CVB-mailbox</div>
+        <div id="lb-mbox"></div>
+      </div>
+      <div class="card fi2">
+        <div class="st" id="src-title">Waar vandaan (top afzenderdomeinen)</div>
+        <div id="lb-src"></div>
+      </div>
+    </div>
+
     <div class="g2e">
       <div class="card fi2">
         <div class="st">Onderwerpen woordwolk</div>
@@ -407,7 +432,14 @@ function drawDonut(id,lbls,data,cols){
 }
 
 // ── APP STATE ──
-var ALL=[],ROWS=[],AS=null,AD=null,AST=null;
+var ALL=[],ROWS=[],AS=null,AD=null,AST=null,ADIR='Inbound';
+function setDir(d){
+  ADIR=d;
+  document.getElementById('btn-in').classList.toggle('active',d==='Inbound');
+  document.getElementById('btn-out').classList.toggle('active',d==='Outbound');
+  document.getElementById('btn-all').classList.toggle('active',d==='all');
+  applyF();
+}
 var DAYS=['Zo','Ma','Di','Wo','Do','Vr','Za'];
 var MONTHS=['jan','feb','mrt','apr','mei','jun','jul','aug','sep','okt','nov','dec'];
 
@@ -422,7 +454,25 @@ fi.addEventListener('change',function(e){if(e.target.files[0])loadF(e.target.fil
 dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('ov');});
 dz.addEventListener('dragleave',function(){dz.classList.remove('ov');});
 dz.addEventListener('drop',function(e){e.preventDefault();dz.classList.remove('ov');if(e.dataTransfer.files[0])loadF(e.dataTransfer.files[0]);});
-function loadF(file){var r=new FileReader();r.onload=function(e){process(parseCSV(e.target.result).data);};r.readAsText(file);}
+function loadF(file){
+  // Detect encoding: UTF-16 LE files start with FF FE BOM
+  var r=new FileReader();
+  r.onload=function(e){
+    var buf=e.target.result;
+    var bytes=new Uint8Array(buf.slice(0,4));
+    var isUtf16=(bytes[0]===0xFF&&bytes[1]===0xFE)||(bytes[1]===0&&bytes[3]===0&&bytes[0]>0);
+    var text;
+    if(isUtf16){
+      // Try UTF-16 LE decode
+      try{text=new TextDecoder('utf-16le').decode(buf);}
+      catch(e2){text=new TextDecoder('utf-8').decode(buf);}
+    }else{
+      text=new TextDecoder('utf-8').decode(buf);
+    }
+    process(parseCSV(text).data);
+  };
+  r.readAsArrayBuffer(file);
+}
 function loadPaste(){
   var raw=document.getElementById('cp').value.trim();
   if(!raw){showErr('Plak eerst de CSV-inhoud.');return;}
@@ -441,16 +491,28 @@ function resetDash(){
 }
 
 // ── PARSE ──
+// Internal CVB domains
+var CVB_DOMAINS=['cvbinkomen.nl','amplioverzuimexperts.nl','amplioarbo.nl','amplio360.nl','cvbdiensten.nl','llauran.nl'];
+function isCVB(addr){var dom=(addr||'').split('@')[1]||'';return CVB_DOMAINS.some(function(d){return dom===d||dom.startsWith(d);});}
+
 function process(raw){
   ALL=raw.map(function(r){
     var n={};
     Object.keys(r).forEach(function(k){n[k.replace(/^\uFEFF/,'').trim()]=(r[k]||'').trim();});
-    n._dt=new Date(n.Received||n.received||n.ReceivedDateTime||'');
-    n._sender=(n.SenderAddress||n.senderaddress||'').toLowerCase();
-    n._recip=(n.RecipientAddress||n.recipientaddress||'').toLowerCase();
-    n._status=n.Status||n.status||'Unknown';
+    // Support both MessageTrace and ConnectorReport formats
+    var dtRaw=n.Received||n.received||n.ReceivedDateTime||n.date_utc||'';
+    // date_utc is just a date (YYYY-MM-DD), add noon so it's valid
+    if(/^\d{4}-\d{2}-\d{2}$/.test(dtRaw)) dtRaw=dtRaw+'T12:00:00Z';
+    n._dt=new Date(dtRaw);
+    n._sender=(n.SenderAddress||n.senderaddress||n.sender_address||'').toLowerCase();
+    n._recip=(n.RecipientAddress||n.recipientaddress||n.recipient_address||'').toLowerCase();
+    n._status=n.Status||n.status||'';
     n._subject=n.Subject||n.subject||'';
     n._size=parseInt(n.Size||n.size||'0')||0;
+    // Direction: explicit field or derive from CVB domains
+    var dir=n.Direction||n.direction||'';
+    if(!dir){dir=isCVB(n._recip)?'Inbound':(isCVB(n._sender)?'Outbound':'Unknown');}
+    n._dir=dir;
     return n;
   }).filter(function(r){return !isNaN(r._dt)&&r._dt.getFullYear()>2000;});
   if(!ALL.length){showErr('Geen geldige rijen gevonden.');return;}
@@ -476,6 +538,7 @@ function applyF(){
     if(AS&&r._sender!==AS)return false;
     if(AD&&(r._sender.split('@')[1]||'')!==AD)return false;
     if(AST&&r._status!==AST)return false;
+    if(ADIR!=='all'&&r._dir!==ADIR)return false;
     return true;
   });
   renderChips();renderAll();
@@ -504,6 +567,13 @@ function renderAll(){
   var del=stats['Delivered']||0,fail=(stats['Failed']||0)+(stats['Quarantined']||0)+(stats['FilteredAsSpam']||0);
   document.getElementById('sbdl').textContent=del.toLocaleString('nl-NL');
   document.getElementById('sbfl').textContent=fail.toLocaleString('nl-NL');
+  // Update direction counts in summary
+  var inCnt=ROWS.filter(function(r){return r._dir==='Inbound';}).length;
+  var outCnt=ROWS.filter(function(r){return r._dir==='Outbound';}).length;
+  var sbin=document.getElementById('sb-in');
+  var sbout=document.getElementById('sb-out');
+  if(sbin)sbin.textContent=inCnt.toLocaleString('nl-NL');
+  if(sbout)sbout.textContent=outCnt.toLocaleString('nl-NL');
   setN('kt',rows.length);setN('kd',del);
   document.getElementById('kds').textContent=Math.round(del/rows.length*100)+'% bezorgd';
   setN('kf',fail);setN('ks2',Object.keys(tally(rows,function(r){return r._sender;})).length);
@@ -572,7 +642,38 @@ function renderAll(){
   var maxW=topW.length?topW[0][1]:1;
   var wcEl=document.getElementById('wc');wcEl.innerHTML='';
   topW.forEach(function(entry){var w=entry[0],c=entry[1];var el=document.createElement('span');el.className='ww';el.textContent=w;el.style.fontSize=(10+Math.round(c/maxW*30))+'px';el.style.opacity=0.4+(c/maxW)*0.6;el.title=w+': '+c+'\xd7';wcEl.appendChild(el);});
+  renderMboxSrc();
   renderFails();
+}
+
+function renderMboxSrc(){
+  var rows=ROWS;
+  var isIn=ADIR==='Inbound', isOut=ADIR==='Outbound', isAll=ADIR==='all';
+  
+  // Mailbox leaderboard: CVB addresses receiving (inbound) or sending (outbound)
+  var mboxMap={};
+  rows.forEach(function(r){
+    var addr=isOut?r._sender:r._recip;
+    if(isCVB(addr)){mboxMap[addr]=(mboxMap[addr]||0)+1;}
+  });
+  var mboxTitle=isOut?'Uitgaand per CVB-afzender':(isAll?'CVB-mailboxen (totaal)':'Inkomend per CVB-mailbox');
+  document.getElementById('mbox-title').textContent=mboxTitle;
+  var mboxTop=Object.entries(mboxMap).sort(function(a,b){return b[1]-a[1];}).slice(0,10);
+  mkLB('lb-mbox',mboxTop,'#2e7d32',null,null);
+
+  // Source/dest leaderboard: external domains
+  var srcMap={};
+  rows.forEach(function(r){
+    var addr=isOut?r._recip:r._sender;
+    if(!isCVB(addr)){
+      var dom=(addr.split('@')[1]||'unknown').split(';')[0];
+      srcMap[dom]=(srcMap[dom]||0)+1;
+    }
+  });
+  var srcTitle=isOut?'Naar welk domein (top ontvangers)':'Waar vandaan (top afzenderdomeinen)';
+  document.getElementById('src-title').textContent=srcTitle;
+  var srcTop=Object.entries(srcMap).sort(function(a,b){return b[1]-a[1];}).slice(0,10);
+  mkLB('lb-src',srcTop,'#1b5e20',null,null);
 }
 function renderFails(){
   var q=(document.getElementById('fs2')?document.getElementById('fs2').value:'').toLowerCase();
